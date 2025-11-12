@@ -1,2 +1,2 @@
-# Permutation-Invariant-Neuromotor-Decoding
-A Permutation-Invariant Set-Transformer for Robust Neuromotor Decoding
+# Channel-Shift-Invariant-Neuromotor-Decoding
+A Channel-Shift-Invariant Set-Transformer for Robust Neuromotor Decoding
