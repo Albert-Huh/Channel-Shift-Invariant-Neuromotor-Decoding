@@ -4,7 +4,7 @@ padding: [19014, 974]
 concatenate_prompts: true
 min_duration_s: 16.0
 
-num_workers: 0
+num_workers: 19
 
 transform:
   _target_: generic_neuromotor_interface.transforms.HandwritingTransform
@@ -14,3 +14,14 @@ data_location: ${data_location}
 emg_augmentation:
   _target_: generic_neuromotor_interface.augmentation.RotationAugmentation
   rotation: 1
+# channel augmentation controls (split-specific)
+channel_aug:
+  train:
+    rotation:      { enable: false, random_k: false, k: 0, k_range: [-8, 8] }
+    permutation:   { enable: false, mode: "random", perm_file: null }
+  val:
+    rotation:      { enable: false, random_k: false, k: 0, k_range: [-8, 8] }
+    permutation:   { enable: false, mode: "random", perm_file: null }
+  test:
+    rotation:      { enable: false, random_k: false, k: 0, k_range: [-8, 8] }
+    permutation:   { enable: false, mode: "random", perm_file: null }

@@ -10,6 +10,7 @@ import numpy as np
 import pandas as pd
 import pytorch_lightning as pl
 import torch
+from typing import Optional, Dict, Any
 
 from generic_neuromotor_interface.data import (
     DataSplit,
@@ -20,6 +21,81 @@ from generic_neuromotor_interface.transforms import HandwritingTransform, Transf
 from generic_neuromotor_interface.utils import handwriting_collate
 from torch.utils.data import DataLoader, default_collate
 
+
+# channel-augmentation helpers for collate-time
+def _sample_rotation_k(cfg: Dict[str, Any] | None, C: int, g: Optional[torch.Generator]) -> int:
+    if not cfg or not cfg.get("enable", False):
+        return 0
+    if cfg.get("random_k", False):
+        lo, hi = cfg.get("k_range", [-8, 8])
+        k = int(torch.randint(low=int(lo), high=int(hi)+1, size=(1,), generator=g).item())
+    else:
+        k = int(cfg.get("k", 0))
+    # normalize to shortest equivalent rotation
+    k = ((k % C) + C) % C
+    if k > C // 2:
+        k = k - C
+    return k
+
+def _apply_rotation(x: torch.Tensor, k: int) -> torch.Tensor:
+    if k == 0:
+        return x
+    return torch.roll(x, shifts=int(k), dims=-1)
+
+def _sample_permutation(cfg: Dict[str, Any] | None, C: int, g: Optional[torch.Generator], device: torch.device) -> Optional[torch.Tensor]:
+    if not cfg or not cfg.get("enable", False):
+        return None
+    mode = cfg.get("mode", "random")
+    if mode == "random":
+        return torch.randperm(C, generator=g, device=device)
+    elif mode == "fixed":
+        path = cfg.get("perm_file", None)
+        if path:
+            try:
+                arr = torch.load(path, map_location=device)
+                perm = torch.as_tensor(arr, dtype=torch.long, device=device)
+            except Exception:
+                import numpy as np
+                perm = torch.as_tensor(np.load(path), dtype=torch.long, device=device)
+            assert perm.ndim == 1 and int(perm.numel()) == C, "perm_file must be a 1D permutation of size C"
+            return perm
+    return None
+
+def make_handwriting_collate_with_channel_aug(base_collate, aug_cfg_split: Dict[str, Any] | None, seed: Optional[int] = None):
+    """
+    Wrap base handwriting_collate so we can apply channel rotation/permutation
+    to batch['emg'] with shape (N, T, C). All other keys are untouched.
+    """
+    gen = None
+    if seed is not None:
+        gen = torch.Generator()
+        gen.manual_seed(int(seed))
+
+    def _collate(samples):
+        batch = base_collate(samples)
+        x = batch.get("emg", None)
+        if x is None:
+            return batch
+        C = int(x.shape[-1])
+        device = x.device
+
+        # rotation
+        rot_cfg = (aug_cfg_split or {}).get("rotation", {})
+        k = _sample_rotation_k(rot_cfg, C, gen)
+        if rot_cfg.get("enable", False):
+            x = _apply_rotation(x, k)
+
+        # permutation
+        perm_cfg = (aug_cfg_split or {}).get("permutation", {})
+        if perm_cfg.get("enable", False):
+            perm = _sample_permutation(perm_cfg, C, gen, device)
+            if perm is not None:
+                x = x.index_select(dim=-1, index=perm)
+
+        batch["emg"] = x
+        return batch
+
+    return _collate
 
 def custom_collate_fn(batch):
     """
@@ -238,9 +314,13 @@ class HandwritingEmgDataModule(pl.LightningDataModule):
         emg_augmentation: Callable[[torch.Tensor], torch.Tensor] | None = None,
         concatenate_prompts: bool = False,
         min_duration_s: float = 0.0,
+        channel_aug: Optional[Dict[str, Any]] = None,
+        seed: int = 42,
     ) -> None:
         super().__init__()
         self.collate_fn = handwriting_collate
+        self.channel_aug = channel_aug or {}
+        self.seed = seed
 
         self.batch_size = batch_size
         self.padding = padding
@@ -251,6 +331,10 @@ class HandwritingEmgDataModule(pl.LightningDataModule):
         self.data_location = data_location
         self.concatenate_prompts = concatenate_prompts
         self.min_duration_s = min_duration_s
+
+    def _collate_for_split(self, split: str):
+        aug_cfg = (self.channel_aug or {}).get(split, {})
+        return make_handwriting_collate_with_channel_aug(self.collate_fn, aug_cfg, seed=self.seed)
 
     def setup(self, stage: str | None = None) -> None:
         if stage == "fit" or stage is None:
@@ -294,7 +378,7 @@ class HandwritingEmgDataModule(pl.LightningDataModule):
             num_workers=self.num_workers,
             pin_memory=True,
             shuffle=True,
-            collate_fn=self.collate_fn,
+            collate_fn=self._collate_for_split("train"),
         )
 
     def val_dataloader(self) -> DataLoader:
@@ -304,7 +388,7 @@ class HandwritingEmgDataModule(pl.LightningDataModule):
             num_workers=self.num_workers,
             pin_memory=True,
             shuffle=False,
-            collate_fn=self.collate_fn,
+            collate_fn=self._collate_for_split("val"),
         )
 
     def test_dataloader(self) -> DataLoader:
@@ -314,5 +398,5 @@ class HandwritingEmgDataModule(pl.LightningDataModule):
             num_workers=self.num_workers,
             pin_memory=True,
             shuffle=False,
-            collate_fn=self.collate_fn,
+            collate_fn=self._collate_for_split("test"),
         )
