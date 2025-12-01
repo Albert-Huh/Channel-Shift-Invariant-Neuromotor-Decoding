@@ -1424,6 +1424,231 @@ def ConformerEncoder(
     return SlicedSequential(*seq)
 
 
+class SetMultiHeadAttention(nn.Module):
+    """Multi-head attention block for set processing.
+
+    Implements standard multi-head attention mechanism used in SetTransformer.
+    This is distinct from the Conformer MultiHeadAttention which uses causal windowing.
+    """
+
+    def __init__(self, dim_q: int, dim_kv: int, dim_out: int, num_heads: int):
+        super().__init__()
+        assert dim_out % num_heads == 0, "dim_out must be divisible by num_heads"
+        self.num_heads = num_heads
+        self.dim_head = dim_out // num_heads
+
+        self.W_q = nn.Linear(dim_q, dim_out)
+        self.W_k = nn.Linear(dim_kv, dim_out)
+        self.W_v = nn.Linear(dim_kv, dim_out)
+        self.W_o = nn.Linear(dim_out, dim_out)
+
+    def forward(self, Q: torch.Tensor, K: torch.Tensor, V: torch.Tensor, mask: torch.Tensor | None = None) -> torch.Tensor:
+        """
+        Parameters
+        ----------
+        Q : torch.Tensor
+            Query tensor of shape (B, Nq, dim_q)
+        K : torch.Tensor
+            Key tensor of shape (B, Nk, dim_kv)
+        V : torch.Tensor
+            Value tensor of shape (B, Nk, dim_kv)
+        mask : torch.Tensor | None, optional
+            Attention mask, by default None
+
+        Returns
+        -------
+        torch.Tensor
+            Output tensor of shape (B, Nq, dim_out)
+        """
+        B, Nq, _ = Q.shape
+        Nk = K.size(1)
+
+        q = self.W_q(Q).view(B, Nq, self.num_heads, self.dim_head).transpose(1, 2)  # (B, H, Nq, Dh)
+        k = self.W_k(K).view(B, Nk, self.num_heads, self.dim_head).transpose(1, 2)  # (B, H, Nk, Dh)
+        v = self.W_v(V).view(B, Nk, self.num_heads, self.dim_head).transpose(1, 2)  # (B, H, Nk, Dh)
+
+        attn_scores = torch.matmul(q, k.transpose(-2, -1)) / (self.dim_head ** 0.5)  # (B, H, Nq, Nk)
+        if mask is not None:
+            attn_scores = attn_scores.masked_fill(mask[:, None, None, :] == 0, float('-inf'))
+        attn_weights = F.softmax(attn_scores, dim=-1)
+
+        out = torch.matmul(attn_weights, v)  # (B, H, Nq, Dh)
+        out = out.transpose(1, 2).contiguous().view(B, Nq, self.num_heads * self.dim_head)  # (B, Nq, dim_out)
+        out = self.W_o(out)
+        return out
+
+
+class SAB(nn.Module):
+    """Set Attention Block from SetTransformer.
+
+    X -> LayerNorm -> MHA(X, X) + X -> LayerNorm -> FFN + X
+    """
+
+    def __init__(self, dim_in: int, dim_hidden: int, num_heads: int, dim_ff: int):
+        super().__init__()
+        self.mha = SetMultiHeadAttention(dim_in, dim_in, dim_hidden, num_heads)
+        self.ln1 = nn.LayerNorm(dim_hidden)
+        self.ffn = nn.Sequential(
+            nn.Linear(dim_hidden, dim_ff),
+            nn.ReLU(inplace=True),
+            nn.Linear(dim_ff, dim_hidden),
+        )
+        self.ln2 = nn.LayerNorm(dim_hidden)
+
+    def forward(self, X: torch.Tensor) -> torch.Tensor:
+        """
+        Parameters
+        ----------
+        X : torch.Tensor
+            Input tensor of shape (B, N, dim_in)
+
+        Returns
+        -------
+        torch.Tensor
+            Output tensor of shape (B, N, dim_hidden)
+        """
+        H = self.mha(X, X, X)   # (B, N, dim_hidden)
+        X = self.ln1(H + X)     # residual
+        H2 = self.ffn(X)
+        X = self.ln2(H2 + X)    # residual
+        return X
+
+
+class SetTransformerSpatialEncoder(nn.Module):
+    """SetTransformer-based spatial encoder for processing per-time-step multi-channel features.
+
+    Processes each time step's channels as a set, applying Set Attention Blocks (SABs)
+    and pooling across channels to produce per-time-step embeddings.
+
+    Takes as input batches of shape (B, T, C, F) where:
+        B = batch size
+        T = sequence length (time steps)
+        C = number of channels/electrodes
+        F = per-channel feature dimension
+
+    Produces outputs of shape (B, T, D) where D is the hidden dimension.
+    """
+
+    def __init__(
+        self,
+        in_feat_dim: int,
+        hidden_dim: int,
+        num_heads: int = 4,
+        num_sab_layers: int = 2,
+        ff_dim: int = 256,
+    ):
+        """
+        Parameters
+        ----------
+        in_feat_dim : int
+            Per-channel feature dimension F
+        hidden_dim : int
+            Hidden dimension D (embedding size)
+        num_heads : int, optional
+            Number of attention heads, by default 4
+        num_sab_layers : int, optional
+            Number of Set Attention Block layers, by default 2
+        ff_dim : int, optional
+            Feedforward dimension in SAB, by default 256
+        """
+        super().__init__()
+        # Project per-channel features to hidden_dim if needed
+        if in_feat_dim != hidden_dim:
+            self.input_proj = nn.Linear(in_feat_dim, hidden_dim)
+        else:
+            self.input_proj = nn.Identity()
+
+        self.sab_layers = nn.ModuleList([
+            SAB(dim_in=hidden_dim, dim_hidden=hidden_dim, num_heads=num_heads, dim_ff=ff_dim)
+            for _ in range(num_sab_layers)
+        ])
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """
+        Parameters
+        ----------
+        x : torch.Tensor
+            Input tensor of shape (B, T, C, F)
+
+        Returns
+        -------
+        torch.Tensor
+            Output tensor of shape (B, T, D) where D = hidden_dim
+        """
+        B, T, C, F = x.shape
+        # Merge (B, T) so we can treat each time step independently
+        x = x.view(B * T, C, F)              # (B*T, C, F)
+        x = self.input_proj(x)              # (B*T, C, D)
+
+        for sab in self.sab_layers:
+            x = sab(x)                      # (B*T, C, D)
+
+        # Pool over channels (set dimension)
+        z = x.mean(dim=1)                   # (B*T, D)
+
+        # Reshape back to (B, T, D)
+        z = z.view(B, T, -1)
+        return z
+
+
+class MPFPerChannelFeatureExtractor(nn.Module):
+    """Extract per-channel features from MPF covariance matrices.
+
+    Extracts per-channel features by taking the c-th row from each covariance matrix
+    across all frequency bands. This preserves channel-specific information including
+    auto-covariance (diagonal) and cross-channel covariances.
+
+    Takes as input batches of MPF features of shape
+        (batch_size, frequency, channels, channels, time)
+    and produces outputs of shape
+        (batch_size, time, channels, frequency * channels)
+
+    Parameters
+    ----------
+    num_channels : int
+        Number of channels in the MPF covariances
+    num_freqs : int
+        Number of frequency bands in the MPF features
+    """
+
+    def __init__(
+        self,
+        num_channels: int,
+        num_freqs: int,
+    ) -> None:
+        super().__init__()
+        self.num_channels = num_channels
+        self.num_freqs = num_freqs
+
+    def forward(self, inputs: torch.Tensor) -> torch.Tensor:
+        """
+        Parameters
+        ----------
+        inputs : torch.Tensor
+            MPF features of shape (B, freq, C, C, T)
+
+        Returns
+        -------
+        torch.Tensor
+            Per-channel features of shape (B, T, C, freq * C)
+        """
+        # (B, freq, C, C, T) -> (B, T, freq, C, C)
+        mpf_bt = inputs.permute(0, 4, 1, 2, 3)
+
+        # (B, T, freq, C, C) -> (B, T, C, freq, C)
+        # This reorders so that each channel's row is extracted
+        mpf_rows = mpf_bt.permute(0, 1, 3, 2, 4)
+
+        # Flatten (freq, C) into a single feature dimension
+        B, T, C, Freq, C2 = mpf_rows.shape
+        assert C == C2, "Channel dimensions must match"
+        assert Freq == self.num_freqs, "Frequency dimension must match"
+        F = Freq * C
+        x = mpf_rows.reshape(B, T, C, F)  # (B, T, C, F)
+
+        return x
+
+
 def HandwritingConformer(
     in_dim: int,
     out_dim: int,
@@ -1506,11 +1731,24 @@ class HandwritingArchitecture(nn.Module):
         multivariate power frequency features.
     specgram_augment : MaskAug
         SpecAugment module (`MaskAug`) module for data augmentation.
-    invariance_layer : RotationInvariantMPFMLP
+    invariance_layer : RotationInvariantMPFMLP, optional
         Layer that applies rotation invariance to the multivariate
-        power frequency features.
+        power frequency features. Required if use_set_transformer=False.
     encoder : SlicedSequential
         Conformer encoder that processes the features and produces emissions.
+    use_set_transformer : bool, optional
+        Whether to use SetTransformer-based spatial encoder instead of
+        RotationInvariantMPFMLP, by default False.
+    num_freqs : int, optional
+        Number of frequency bands in MPF features. Required if use_set_transformer=True.
+    set_transformer_hidden_dim : int, optional
+        Hidden dimension for SetTransformer. Must match encoder input_dim, by default 64.
+    set_transformer_num_heads : int, optional
+        Number of attention heads in SetTransformer, by default 4.
+    set_transformer_num_layers : int, optional
+        Number of Set Attention Block layers, by default 2.
+    set_transformer_ff_dim : int, optional
+        Feedforward dimension in SetTransformer SAB, by default 256.
     """
 
     def __init__(
@@ -1519,26 +1757,67 @@ class HandwritingArchitecture(nn.Module):
         vocab_size: int,
         featurizer: MultivariatePowerFrequencyFeatures,
         specgram_augment: MaskAug,
-        invariance_layer: RotationInvariantMPFMLP,
         encoder: SlicedSequential,
+        invariance_layer: RotationInvariantMPFMLP | None = None,
+        use_set_transformer: bool = False,
+        num_freqs: int | None = None,
+        set_transformer_hidden_dim: int = 64,
+        set_transformer_num_heads: int = 4,
+        set_transformer_num_layers: int = 2,
+        set_transformer_ff_dim: int = 256,
     ) -> None:
         super().__init__()
 
         self.num_channels = num_channels
         self.vocab_size = vocab_size
+        self.use_set_transformer = use_set_transformer
 
         self.featurizer = featurizer
         self.specaug = specgram_augment
-        self.rotation_invariant_mlp = invariance_layer
         self.conformer = encoder
+
+        if use_set_transformer:
+            if num_freqs is None:
+                raise ValueError("num_freqs must be provided when use_set_transformer=True")
+            # Calculate feature dimension: freq * channels
+            feat_dim = num_freqs * num_channels
+            self.mpf_feature_extractor = MPFPerChannelFeatureExtractor(
+                num_channels=num_channels,
+                num_freqs=num_freqs,
+            )
+            self.set_transformer = SetTransformerSpatialEncoder(
+                in_feat_dim=feat_dim,
+                hidden_dim=set_transformer_hidden_dim,
+                num_heads=set_transformer_num_heads,
+                num_sab_layers=set_transformer_num_layers,
+                ff_dim=set_transformer_ff_dim,
+            )
+            # Note: set_transformer_hidden_dim must match encoder input_dim (configured in YAML)
+            self.rotation_invariant_mlp = None
+        else:
+            if invariance_layer is None:
+                raise ValueError("invariance_layer must be provided when use_set_transformer=False")
+            self.rotation_invariant_mlp = invariance_layer
+            self.mpf_feature_extractor = None
+            self.set_transformer = None
 
         self.slice = slice(self.conformer.extra_left_context, -1, self.conformer.stride)
 
     def forward(self, inputs: torch.Tensor) -> tuple[torch.Tensor, slice]:
         x = self.featurizer(inputs)
         x = self.specaug(x)
-        x = self.rotation_invariant_mlp(x)
-        x = x.transpose(-1, -2)
+
+        if self.use_set_transformer:
+            # Extract per-channel features: (B, freq, C, C, T) -> (B, T, C, F)
+            x = self.mpf_feature_extractor(x)
+            # Apply SetTransformer: (B, T, C, F) -> (B, T, D)
+            x = self.set_transformer(x)
+        else:
+            # Original path: (B, freq, C, C, T) -> (B, output_dim, T)
+            x = self.rotation_invariant_mlp(x)
+            # Transpose: (B, output_dim, T) -> (B, T, output_dim)
+            x = x.transpose(-1, -2)
+
         emissions = self.conformer.forward(x)
 
         return emissions, self.slice

@@ -55,11 +55,20 @@ network:
       T: [4]
     mask_value: 0.0
 
+  # SetTransformer configuration
+  use_set_transformer: false  # Set to true to use SetTransformer instead of RotationInvariantMPFMLP
+  num_freqs: 6  # Number of frequency bands (must match length of frequency_bins in featurizer)
+  set_transformer_hidden_dim: 64  # Must match encoder input_dim
+  set_transformer_num_heads: 4
+  set_transformer_num_layers: 2
+  set_transformer_ff_dim: 256
+
   invariance_layer:
     _target_: generic_neuromotor_interface.networks.RotationInvariantMPFMLP
+    # Note: This is only used when use_set_transformer=False
 
     num_channels: ${lightning_module.network.num_channels}
-    num_freqs: 6
+    num_freqs: ${lightning_module.network.num_freqs}
     hidden_dims: [64]
     offsets:
       - -1
