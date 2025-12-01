@@ -7,13 +7,12 @@
 import logging
 import pprint
 from collections.abc import Callable, Sequence
-
+from pathlib import Path
 from typing import Any
 
 import hydra
 import pytorch_lightning as pl
 import torch.distributed as dist
-
 from hydra.utils import instantiate
 from omegaconf import DictConfig, OmegaConf
 from pytorch_lightning import Trainer
@@ -56,6 +55,13 @@ def train(
     if scratch_dir is not None:
         other_trainer_kwargs["default_root_dir"] = scratch_dir
         logger.info(f"Setting default_root_dir to {scratch_dir=}")
+
+    # Ensure lightning_logs directory exists to avoid DDP race condition
+    # PyTorch Lightning creates this directory by default for TensorBoardLogger
+    root_dir = scratch_dir if scratch_dir else Path.cwd()
+    lightning_logs_dir = Path(root_dir) / "lightning_logs"
+    # Create directory (mkdir handles race conditions with exist_ok=True)
+    lightning_logs_dir.mkdir(parents=True, exist_ok=True)
 
     accelerator = config.trainer.get("accelerator", "auto")
     trainer = pl.Trainer(
