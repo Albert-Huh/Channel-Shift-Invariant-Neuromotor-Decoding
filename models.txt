@@ -1,0 +1,7 @@
+# Original Data
+- Baseline: logs/2025-12-01/12-02-50
+- SetTransformer: logs/2025-12-01/11-42-56
+
+# Augmented Data
+- Baseline: logs/2025-12-01/18-48-34
+- SetTransformer: logs/2025-12-01/18-43-04
