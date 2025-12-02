@@ -15,14 +15,18 @@ Outputs:
   - eval_summary.csv      (aggregated stats per model x condition: mean/std/min/max for key metrics)
 
 Usage example:
-  python eval_results.py \
-    --data_dir ~/emg_data \
-    --config_yaml ~/emg_models/handwriting/model_config.yaml \
-    --repeats 10 \
-    --baseline_noaug_ckpt /path/to/baseline_noaug.ckpt \
-    --baseline_rot_ckpt   /path/to/baseline_trainrot.ckpt \
-    --set_noaug_ckpt      /path/to/set_noaug.ckpt \
-    --set_rot_ckpt        /path/to/set_trainrot.ckpt
+python eval_results.py \
+  --data_dir ~/emg_data \
+  --config_yaml ~/emg_models/handwriting/model_config.yaml \  # fallback default
+  --repeats 10 \
+  --baseline_noaug_ckpt /runs/baseline_noaug/best.ckpt \
+  --baseline_rot_ckpt   /runs/baseline_trainrot/best.ckpt \
+  --set_noaug_ckpt      /runs/set_noaug/best.ckpt \
+  --set_rot_ckpt        /runs/set_trainrot/best.ckpt \
+  --baseline_noaug_yaml /runs/baseline_noaug/.hydra/config.yaml \
+  --baseline_rot_yaml   /runs/baseline_trainrot/.hydra/config.yaml \
+  --set_noaug_yaml      /runs/set_noaug/.hydra/config.yaml \
+  --set_rot_yaml        /runs/set_trainrot/.hydra/config.yaml
 """
 
 import argparse
@@ -197,18 +201,27 @@ def summarize(rows: List[Dict[str, Any]], metrics=("cer", "loss")) -> Dict[str, 
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--data_dir", required=True, help="Folder containing handwriting_corpus.csv and HDF5 files")
-    ap.add_argument("--config_yaml", required=True, help="Path to model_config.yaml")
+    ap.add_argument("--config_yaml", required=True, help="Default merged config YAML (used if per-model YAML not given)")
     ap.add_argument("--repeats", type=int, default=10, help="Number of repeats per condition")
     ap.add_argument("--baseline_noaug_ckpt", default=None)
     ap.add_argument("--baseline_rot_ckpt", default=None)
     ap.add_argument("--set_noaug_ckpt", default=None)
     ap.add_argument("--set_rot_ckpt", default=None)
+    ap.add_argument("--baseline_noaug_yaml", default=None, help="Merged YAML for baseline_noaug (overrides --config_yaml)")
+    ap.add_argument("--baseline_rot_yaml",   default=None, help="Merged YAML for baseline_trainrot (overrides --config_yaml)")
+    ap.add_argument("--set_noaug_yaml",      default=None, help="Merged YAML for set_noaug (overrides --config_yaml)")
+    ap.add_argument("--set_rot_yaml",        default=None, help="Merged YAML for set_trainrot (overrides --config_yaml)")
     ap.add_argument("--out_prefix", default="eval_results", help="Prefix for output files")
     args = ap.parse_args()
 
-    # load config and set data location / corpus CSV
-    cfg = OmegaConf.load(os.path.expanduser(args.config_yaml))
-    cfg = _cfg_with_data(cfg, args.data_dir)
+    # # load config and set data location / corpus CSV
+    # cfg = OmegaConf.load(os.path.expanduser(args.config_yaml))
+    # cfg = _cfg_with_data(cfg, args.data_dir)
+    def load_cfg(yaml_path: str):
+        cfg_ = OmegaConf.load(os.path.expanduser(yaml_path))
+        return _cfg_with_data(cfg_, args.data_dir)
+
+    global_cfg = load_cfg(args.config_yaml)
 
     # conditions
     CLEAN = None
@@ -227,6 +240,14 @@ def main():
     models = [(n, p) for (n, p) in models if p]
     if not models:
         raise SystemExit("No checkpoints provided. Pass at least one of the --*_ckpt flags.")
+    
+    # Per-model YAML map (if provided)
+    per_yaml = {
+        "baseline_noaug": args.baseline_noaug_yaml,
+        "baseline_trainrot": args.baseline_rot_yaml,
+        "set_noaug": args.set_noaug_yaml,
+        "set_trainrot": args.set_rot_yaml,
+    }
 
     all_rows = []
     for model_name, ckpt in models:
@@ -234,6 +255,13 @@ def main():
         if not os.path.exists(ckpt):
             print(f"[warn] Missing checkpoint {ckpt}; skipping {model_name}")
             continue
+
+        # Load the right merged config for this model
+        yaml_for_model = per_yaml.get(model_name)
+        if yaml_for_model:
+            cfg = load_cfg(yaml_for_model)
+        else:
+            cfg = global_cfg
 
         for cond_name, test_aug in [("clean", CLEAN), ("rotation", ROTATION), ("permutation", PERMUTATION)]:
             print(f"\n[info] Evaluating model={model_name} condition={cond_name} repeats={args.repeats}")
