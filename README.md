@@ -222,28 +222,6 @@ data_module:
 
 ---
 
-## Results (handwriting)
-> Fill in with your numbers from `results/handwriting_summary.csv`.
-
-| Model | Train aug | Test condition | CER (mean ± sd) | Loss (mean ± sd) |
-|---|---|---|---:|---:|
-| Baseline | none | clean |  |  |
-| Baseline | none | rotation |  |  |
-| Baseline | none | permutation |  |  |
-| Baseline | rotation | clean |  |  |
-| Baseline | rotation | rotation |  |  |
-| Baseline | rotation | permutation |  |  |
-| Set‑Tx | none | clean |  |  |
-| Set‑Tx | none | rotation |  |  |
-| Set‑Tx | none | permutation |  |  |
-| Set‑Tx | rotation | clean |  |  |
-| Set‑Tx | rotation | rotation |  |  |
-| Set‑Tx | rotation | permutation |  |  |
-
-> Optional: add training/validation curves (images) for each model.
-
----
-
 ## Limitations & future work
 - Permutation‑only stress can be harsher than real don/doff; include cross‑session analyses when possible.
 - Channel dropout augmentation is prototyped but disabled by default; consider enabling for missing‑sensor scenarios.
