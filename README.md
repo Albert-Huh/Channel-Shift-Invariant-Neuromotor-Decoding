@@ -222,6 +222,21 @@ data_module:
 
 ---
 
+## Results (handwriting)
+
+**Validation** metrics from the runs in `plotting/` (best over epochs):
+
+| Model | Train aug | Best Val CER (%) | Best Val Loss |
+|---|---|---:|---:|
+| Baseline | none | 45.74 | 2.041 |
+| Baseline | rotation | 100.00 | 4.548 |
+| Set‑Transformer | none | 43.87 | 1.868 |
+| Set‑Transformer | rotation | 46.45 | 2.095 |
+
+> Note: These are **validation** results used for model selection (early stopping). Test‑set robustness (clean/rotation/permutation with repeats) is produced by `eval_results.py` and can be added when available.
+
+---
+
 ## Limitations & future work
 - Permutation‑only stress can be harsher than real don/doff; include cross‑session analyses when possible.
 - Channel dropout augmentation is prototyped but disabled by default; consider enabling for missing‑sensor scenarios.
