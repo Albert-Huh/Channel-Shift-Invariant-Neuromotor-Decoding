@@ -1,236 +1,264 @@
-# A generic non-invasive neuromotor interface for human-computer interaction
+# Channel-Shift-Invariant Neuromotor Decoding (Handwriting)
 
-[ [`Paper`](https://www.nature.com/articles/s41586-025-09255-w) ] [ [`BibTeX`](#citation) ]
+> A permutation/rotation-robust decoder built **on top of** Meta’s Generic Neuromotor Interface ([ [`Paper`](https://www.nature.com/articles/s41586-025-09255-w) ] [ [`BibTeX`](#citation) ]) for the handwriting task. This repo adds a **Set‑Transformer** backbone and **channel‑space data augmentation** to improve robustness to don/doff (band on/off), band rotation, and electrode misplacement.
 
-[![Neuromotor CI](https://github.com/facebookresearch/generic-neuromotor-interface/actions/workflows/main.yml/badge.svg)](https://github.com/facebookresearch/generic-neuromotor-interface/actions/workflows/main.yml)
+---
 
-This repo is for exploring surface electromyography (sEMG) data and training models associated with the paper ["A generic non-invasive neuromotor interface for human-computer interaction"](https://www.nature.com/articles/s41586-025-09255-w).
+## TL;DR
+- **Problem:** EMG channel layout changes across wear sessions → baseline decoders are sensitive to channel order/rotation.
+- **Idea:** Treat channels as an **unordered set** (Set‑Transformer encoder) + **channel‑space augmentation** (rotation, permutation) to learn spatially robust representations.
+- **Scope:** Handwriting task on the public GNI dataset (80 train / 10 val / 10 test users). Baselines kept intact for fair comparison.
 
-The dataset contains sEMG recordings from 100 participants in each of the three tasks described in the paper: `discrete_gestures`, `handwriting`, and `wrist`. This repo contains implementations of the models in the paper as well as code for training and evaluating the models.
+---
 
-![Figure 1 from the paper](images/figure_1.png)
+## What’s new in this repo (vs. upstream GNI)
+1. **Set‑Transformer backbone** for handwriting
+   - Toggle via config: `lightning_module.network.use_set_transformer={true|false}`.
+   - Drop‑in replacement; downstream decoder (CTC, Conformer) and metrics unchanged.
+2. **Channel‑space augmentation** built into the DataModule (per split)
+   - Hydra keys under `data_module.channel_aug.{train|val|test}`.
+   - Augs supported: **circular rotation** (random/fixed), **random permutation** (stress test).
+3. **Robustness evaluation utilities**
+   - `eval_results.py` – run **clean**, **rotation**, and **permutation** test conditions **N** repeats per model; aggregates mean/std/min/max.
+4. **Label export utilities** (optional, for analysis)
+   - `export_handwriting_labels_all_splits.py` – dumps ground‑truth labels (train/val/test) to JSON/TSV.
+5. **Notebooks & scripts** for quick starts
+   - Based on upstream `handwriting-eval.ipynb`, plus training/eval automation and augmentation toggles.
+
+---
+
+## Repository structure (key files)
+```
+./
+├─ run.sh                         # Minimal, block‑style commands for baseline / SetTx + aug variants
+├─ eval_results.py                # Evaluate checkpoints under clean/rotation/permutation (repeat N times)
+├─ export_handwriting_labels_all_splits.py   # (optional) Export reference labels
+├─ notebooks/
+│  └─ handwriting-eval.ipynb      # Example inference/eval (clean + augmented)
+├─ generic_neuromotor_interface/
+│  ├─ networks.py                  # Handwriting nets; Set‑Transformer toggle via use_set_transformer
+│  ├─ data_module.py               # DataModule with channel_aug per split (train/val/test)
+│  └─ ...                          # (upstream GNI modules retained)
+└─ ...
+```
+
+---
 
 ## Setup
 
-First, clone this repository and navigate to the root directory.
-
+### 1) Environment
 ```bash
-git clone https://github.com/facebookresearch/generic-neuromotor-interface.git
-cd generic-neuromotor-interface
-```
-
-Now setup the conda environment and install the local package.
-
-```bash
-# Setup and activate the environment
-conda env create -f environment.yml
+# Python >=3.10 recommended
+conda create -n neuromotor python=3.10 -y
 conda activate neuromotor
-
-# Install this repository as a package
 pip install -e .
 ```
 
-## Download the data and models
-
-To download the full dataset to `~/emg_data` for a given task, run:
-
+### 2) Data & (optional) pretrained weights
 ```bash
-python -m generic_neuromotor_interface.scripts.download_data \
-    --task $TASK_NAME \
-    --output-dir ~/emg_data
+# Download the public handwriting subset or full data to ./data
+python -m generic_neuromotor_interface.scripts.download_data handwriting full_data ./data
+# (optional) Pretrained model
+python -m generic_neuromotor_interface.scripts.download_models handwriting ./models
 ```
 
-where `$TASK_NAME`  is one of {`discrete_gestures, handwriting, wrist`}.
+> The dataset CSV is expected at `./data/handwriting_corpus.csv`.
 
-Alternatively, you can download and extract a smaller version of the dataset with only 3 participants per task to quickly get started:
+---
 
-```bash
-# NOTE: `--small-subset` downloads only 3 users per task
-python -m generic_neuromotor_interface.scripts.download_data \
-    --task $TASK_NAME \
-    --output-dir ~/emg_data \
-    --small-subset
-```
+## Training
+**We keep validation clean** (no aug) to ensure early‑stopping & best checkpoint selection are comparable across runs. Edit `run.sh` and uncomment **one block** at a time.
 
-To download pretrained checkpoints for a task, run:
-
-```bash
-python -m generic_neuromotor_interface.scripts.download_models \
-    --task $TASK_NAME \
-    --output-dir ~/emg_models
-```
-
-The extracted output contains a `.ckpt` file and a `model_config.yaml` file.
-
-## Explore the data in a notebook
-
-Use the `explore_data.ipynb` notebook to see how data can be loaded and plotted:
-
-```bash
-jupyter lab notebooks/explore_data.ipynb
-```
-
-## Train a model
-
-Train a model via:
-
+### Baseline (no augmentation)
 ```bash
 python -m generic_neuromotor_interface.train \
-    --config-name=$TASK_NAME
+  --config-name=handwriting \
+  data_location=$(pwd)/data \
+  trainer.max_epochs=40 \
+  lightning_module.network.use_set_transformer=false \
+  +callbacks.1.save_top_k=-1 +callbacks.1.every_n_epochs=1 \
+  +data_module.channel_aug.train.rotation.enable=false \
+  +data_module.channel_aug.train.permutation.enable=false \
+  +data_module.channel_aug.val.rotation.enable=false \
+  +data_module.channel_aug.val.permutation.enable=false \
+  +data_module.channel_aug.test.rotation.enable=false \
+  +data_module.channel_aug.test.permutation.enable=false
 ```
 
-Note that this requires downloading the `full_data` dataset as described earlier.
-
-You can also launch a small test run (1 epoch on the `small_subset` dataset) via:
-
+### Baseline (train‑time rotation; val/test clean)
 ```bash
 python -m generic_neuromotor_interface.train \
-    --config-name=$TASK_NAME \
-    trainer.max_epochs=1 \
-    trainer.accelerator=cpu \
-    data_module/data_split=${TASK_NAME}_mini_split
+  --config-name=handwriting \
+  data_location=$(pwd)/data \
+  trainer.max_epochs=40 \
+  lightning_module.network.use_set_transformer=false \
+  +callbacks.1.save_top_k=-1 +callbacks.1.every_n_epochs=1 \
+  +data_module.channel_aug.train.rotation.enable=true \
+  +data_module.channel_aug.train.rotation.random_k=true \
+  +data_module.channel_aug.train.rotation.k_range=[-8,8] \
+  +data_module.channel_aug.train.permutation.enable=false \
+  +data_module.channel_aug.val.rotation.enable=false \
+  +data_module.channel_aug.val.permutation.enable=false \
+  +data_module.channel_aug.test.rotation.enable=false \
+  +data_module.channel_aug.test.permutation.enable=false
 ```
 
-After training, the model checkpoint will be available at `./logs/<DATE>/<TIME>/lightning_logs/<VERSION>/checkpoints/`, and the model config will be available at `./logs/<DATE>/<TIME>/hydra_configs/config.yaml`.
-
-## Evaluate a model
-
-Model evaluation on the validation and test sets is automatically performed in the training script after training is complete.
-
-We also provide interactive notebooks to run model evaluation on any given trained model. Please see the evaluation notebooks:
-
+### Set‑Transformer (no augmentation)
 ```bash
-jupyter lab notebooks
-
-# see:
-# notebooks/discrete_gestures_eval.ipynb
-# notebooks/handwriting_eval.ipynb
-# notebooks/wrist_eval.ipynb
+python -m generic_neuromotor_interface.train \
+  --config-name=handwriting \
+  data_location=$(pwd)/data \
+  trainer.max_epochs=40 \
+  lightning_module.network.use_set_transformer=true \
+  +callbacks.1.save_top_k=-1 +callbacks.1.every_n_epochs=1 \
+  +data_module.channel_aug.train.rotation.enable=false \
+  +data_module.channel_aug.train.permutation.enable=false \
+  +data_module.channel_aug.val.rotation.enable=false \
+  +data_module.channel_aug.val.permutation.enable=false \
+  +data_module.channel_aug.test.rotation.enable=false \
+  +data_module.channel_aug.test.permutation.enable=false
 ```
-These notebooks also provide some visualizations of the model outputs.
 
-## Dataset details
+### Set‑Transformer (train‑time rotation; val/test clean)
+```bash
+python -m generic_neuromotor_interface.train \
+  --config-name=handwriting \
+  data_location=$(pwd)/data \
+  trainer.max_epochs=40 \
+  lightning_module.network.use_set_transformer=true \
+  +callbacks.1.save_top_k=-1 +callbacks.1.every_n_epochs=1 \
+  +data_module.channel_aug.train.rotation.enable=true \
+  +data_module.channel_aug.train.rotation.random_k=true \
+  +data_module.channel_aug.train.rotation.k_range=[-8,8] \
+  +data_module.channel_aug.train.permutation.enable=false \
+  +data_module.channel_aug.val.rotation.enable=false \
+  +data_module.channel_aug.val.permutation.enable=false \
+  +data_module.channel_aug.test.rotation.enable=false \
+  +data_module.channel_aug.test.permutation.enable=false
+```
 
-<div align="center">
-    <table>
-      <thead>
-        <tr>
-          <th rowspan="2">Quantity</th>
-          <th colspan="3">Discrete Gestures</th>
-          <th colspan="3">Handwriting</th>
-          <th colspan="3">Wrist</th>
-        </tr>
-        <tr>
-          <th>Train</th>
-          <th>Val</th>
-          <th>Test</th>
-          <th>Train</th>
-          <th>Val</th>
-          <th>Test</th>
-          <th>Train</th>
-          <th>Val</th>
-          <th>Test</th>
-        </tr>
-      </thead>
-      <tbody>
-        <tr>
-          <td>Number of Users</td>
-          <td>80</td>
-          <td>10</td>
-          <td>10</td>
-          <td>80</td>
-          <td>10</td>
-          <td>10</td>
-          <td>80</td>
-          <td>10</td>
-          <td>10</td>
-        </tr>
-        <tr>
-          <td>Number of Datasets</td>
-          <td>80</td>
-          <td>10</td>
-          <td>10</td>
-          <td>618</td>
-          <td>135</td>
-          <td>54</td>
-          <td>142</td>
-          <td>20</td>
-          <td>20</td>
-        </tr>
-        <tr>
-          <td>Hours</td>
-          <td>51.4</td>
-          <td>6.2</td>
-          <td>6.4</td>
-          <td>98.8</td>
-          <td>31.5</td>
-          <td>10.4</td>
-          <td>60.2</td>
-          <td>8.7</td>
-          <td>8.3</td>
-        </tr>
-        <tr>
-          <td>Datasets Per User</td>
-          <td>1.0</td>
-          <td>1.0</td>
-          <td>1.0</td>
-          <td>7.7</td>
-          <td>13.5</td>
-          <td>5.4</td>
-          <td>1.8</td>
-          <td>2.0</td>
-          <td>2.0</td>
-        </tr>
-        <tr>
-          <td>Hours Per User</td>
-          <td>0.6</td>
-          <td>0.6</td>
-          <td>0.6</td>
-          <td>1.2</td>
-          <td>3.2</td>
-          <td>1.0</td>
-          <td>0.8</td>
-          <td>0.9</td>
-          <td>0.8</td>
-        </tr>
-      </tbody>
-    </table>
-</div>
+> **Fixed rotation** instead of random: set `random_k=false` and `k=<int>` (e.g., `k=4`).
 
-We are releasing data from 100 data collection participants for each task: 80 train, 10 validation, and 10 test participants. Train participants correspond to those from the 80 participant data point in Figures 2e-g (except for Handwriting, where we randomly selected 80 participants from the 100 participant data point). The 10 validation and train participants were randomly selected from the full set of validation and test participants.
+---
 
-Evaluation metrics may deviate slightly from the published results due to subsampling of the test participants (as there is considerable variability across participants) and variability across model seeds.
+## Evaluation
 
-Each recording is stored in an `.hdf5` file, and there can be multiple recordings per participant. There is also a `.csv` file for each task (`${TASK_NAME}_corpus.csv`) documenting the recordings included for each participant, start and end times for each relevant "stage" from the experimental protocol (see below), and their assignment to the train / val / test splits. This `.csv` file is downloaded alongside the data by the download script described above.
+### Quick, single‑pass tests
+**Clean test:**
+```bash
+python -m generic_neuromotor_interface.train \
+  --config-name=handwriting \
+  train=false eval=false test=true \
+  ckpt_path=/abs/path/to/best.ckpt \
+  data_location=$(pwd)/data \
+  +data_module.channel_aug.test.rotation.enable=false \
+  +data_module.channel_aug.test.permutation.enable=false
+```
 
-sEMG is recorded at 2 kHz and is high pass filtered at 40 Hz. Timestamps are expressed in seconds. A `stages` dataframe is included in each dataset that encodes the time of each stage of the experiment (see `explore_data.ipynb` for more details). Specifics for each task are as follows:
+**Rotation stress (random k in [-8,8]):**
+```bash
+python -m generic_neuromotor_interface.train \
+  --config-name=handwriting \
+  train=false eval=false test=true \
+  ckpt_path=/abs/path/to/best.ckpt \
+  data_location=$(pwd)/data \
+  +data_module.channel_aug.test.rotation.enable=true \
+  +data_module.channel_aug.test.rotation.random_k=true \
+  +data_module.channel_aug.test.rotation.k_range=[-8,8] \
+  +data_module.channel_aug.test.permutation.enable=false
+```
 
-### Discrete gestures
+**Permutation stress (rotation disabled):**
+```bash
+python -m generic_neuromotor_interface.train \
+  --config-name=handwriting \
+  train=false eval=false test=true \
+  ckpt_path=/abs/path/to/best.ckpt \
+  data_location=$(pwd)/data \
+  +data_module.channel_aug.test.rotation.enable=false \
+  +data_module.channel_aug.test.permutation.enable=true \
+  +data_module.channel_aug.test.permutation.mode=random
+```
 
-Datasets include the `name` of each gesture and the `time` at which it occurred. Stage names include the types of gestures performed in each stage, as well as the posture (e.g. `static_arm_in_front`, `static_arm_in_lap`, ...)
+### Robustness with repeats (aggregated stats)
+Use `eval_results.py` to run **N repeats** per condition and aggregate metrics:
+```bash
+python eval_results.py \
+  --data_dir $(pwd)/data \
+  --config_yaml /path/to/merged_config.yaml \  # per‑model merged Hydra config
+  --repeats 10 \
+  --baseline_noaug_ckpt /runs/baseline_noaug/best.ckpt \
+  --baseline_rot_ckpt   /runs/baseline_trainrot/best.ckpt \
+  --set_noaug_ckpt      /runs/set_noaug/best.ckpt \
+  --set_rot_ckpt        /runs/set_trainrot/best.ckpt \
+  --baseline_noaug_yaml /runs/baseline_noaug/.hydra/config.yaml \
+  --baseline_rot_yaml   /runs/baseline_trainrot/.hydra/config.yaml \
+  --set_noaug_yaml      /runs/set_noaug/.hydra/config.yaml \
+  --set_rot_yaml        /runs/set_trainrot/.hydra/config.yaml \
+  --out_prefix results/handwriting
+```
+Outputs:
+- `results/handwriting.csv` – per‑run metrics
+- `results/handwriting_summary.csv` – mean/std/min/max per (model × condition)
 
-### Handwriting
+---
 
-Handwriting datasets include the `start` and `end` time of each prompt. `start` is the time the prompt appears, and `end` is the time at which participants marked as having finished writing the prompt. Stage names describe the types of prompts in each stage (e.g. `words_with_backspace`, `three_digit_numbers`, ...).
+## Configuration reference (augmentation)
+All augmentation knobs live under `data_module.channel_aug` and can be set **per split**:
+```yaml
+# example
+data_module:
+  channel_aug:
+    train:
+      rotation:    { enable: true,  random_k: true, k_range: [-8, 8] }  # or: { enable: true, random_k: false, k: 4 }
+      permutation: { enable: false }
+    val:
+      rotation:    { enable: false }
+      permutation: { enable: false }
+    test:
+      rotation:    { enable: true,  random_k: true, k_range: [-8, 8] }
+      permutation: { enable: false }
+```
 
-### Wrist
+---
 
-Wrist angle datasets also include wrist angle measurements, which are upsampled to match the 2 kHz EMG sampling rate. Stage names include information about the type of task and movement in each stage (e.g. `cursor_to_target_task_horizontal_low_gain_screen_4`, `smooth_pursuit_task_high_gain_1`, ...).
+## Results (handwriting)
+> Fill in with your numbers from `results/handwriting_summary.csv`.
+
+| Model | Train aug | Test condition | CER (mean ± sd) | Loss (mean ± sd) |
+|---|---|---|---:|---:|
+| Baseline | none | clean |  |  |
+| Baseline | none | rotation |  |  |
+| Baseline | none | permutation |  |  |
+| Baseline | rotation | clean |  |  |
+| Baseline | rotation | rotation |  |  |
+| Baseline | rotation | permutation |  |  |
+| Set‑Tx | none | clean |  |  |
+| Set‑Tx | none | rotation |  |  |
+| Set‑Tx | none | permutation |  |  |
+| Set‑Tx | rotation | clean |  |  |
+| Set‑Tx | rotation | rotation |  |  |
+| Set‑Tx | rotation | permutation |  |  |
+
+> Optional: add training/validation curves (images) for each model.
+
+---
+
+## Limitations & future work
+- Permutation‑only stress can be harsher than real don/doff; include cross‑session analyses when possible.
+- Channel dropout augmentation is prototyped but disabled by default; consider enabling for missing‑sensor scenarios.
+- Language‑model post‑processing (spell/grammar) can further reduce effective CER without touching the decoder.
+
+---
+
+## Acknowledgements
+- Built on **Meta’s Generic Neuromotor Interface** (GNI) for the handwriting task. Please see the upstream license and citations in the original repository.
+
+## License
+This project inherits the upstream licensing terms where applicable. See `LICENSE` for details.
 
 ## License
 
 The dataset and the code are CC-BY-NC-4.0 licensed, as found in the LICENSE file.
 
-## Citation
 
-```
-@article{generic_neuromotor_interface_2025,
-  title = {A generic non-invasive neuromotor interface for human-computer interaction},
-  author = {Kaifosh, Patrick and Reardon, Thomas R. and CTRL-labs at Reality Labs},
-  journal = {Nature},
-  year = {2025},
-  doi = {10.1038/s41586-025-09255-w},
-  issn = {1476-4687},
-  url = {https://www.nature.com/articles/s41586-025-09255-w},
-}
-```
